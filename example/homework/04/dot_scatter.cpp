@@ -1,61 +1,223 @@
-#include "mpi.h"
 #include <iostream>
-#include <stdio.h>
-#include <stdlib.h>
+
 #include <vector>
-#include <numeric> // for std::inner_product
 
-using namespace std;
+#include <mpi.h>
 
-int main(int argc, char **argv)
+
+
+int main(int argc, char *argv[])
+
 {
-    int rank, size;
+
     MPI_Init(&argc, &argv);
+
+    int rank, size;
+
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    int M = size; // Length of the vectors
-    int local_size = M / size; // Size of local portion of vectors
+    int P = 2; // Number of rows
 
-    // Initialize vectors
-    vector<int> horizontal_vec(M); // Horizontal vector
-    vector<int> vertical_vec(local_size); // Vertical vector
+    int Q = size / P; // Number of columns
 
-    // Linear load-balanced distribution for horizontal vector
-    for (int i = 0; i < M; ++i) {
-        horizontal_vec[i] = i + 1; // Just an example initialization
+    // Check if the number of processes is compatible with the topology 
+
+    if (size != P * Q)
+
+    {
+
+        if (rank == 0)
+
+            std::cout << "Number of processes is not compatible with the topology." << std::endl;
+
+        MPI_Finalize();
+
+        exit(0);
+
     }
-    cout << "Horizontal Vector:" << endl;
-    for (int i = 0; i < M; ++i) {
-        cout << horizontal_vec[i] << " ";
+
+    //Your process needs coordinates:
+
+    int p = rank / Q, q = rank % Q;
+
+
+
+    //std::cout << "( " << p << "," << q << ") progressing..." << std::endl;
+
+    int M = 15; // Length of vector x --- let's make it longer; M>=P always a must fyi.
+
+    // Allocate memory for vector xglobal, x, and y
+
+    std::vector<int> xglobal, x, y;
+
+    // Initialize data only in process (0, 0)
+
+    if (q == 0)
+
+    {
+
+        if (p == 0)
+
+        {
+
+            xglobal.resize(M);
+
+            for (int i = 0; i < M; i++)
+
+            {
+
+                xglobal[i] = i + 1; // Initialize xglobal with some data
+
+            }
+
+            std::cout << "(0,0) filled in xglobal[]" << std::endl;
+
+        }
+
     }
-    cout << endl;
 
-    // Scatter distribution for vertical vector
-    MPI_Scatter(&horizontal_vec[0], local_size, MPI_INT, &vertical_vec[0], local_size, MPI_INT, 0, MPI_COMM_WORLD);
+    //std::cout << "( " << p << "," << q << ") progressing more..." << std::endl;
 
-    // Print out the local portion of the vertical vector
-    cout << "Rank: " << rank << " Vertical Vector:" << endl;
-    for (int i = 0; i < local_size; ++i) {
-        cout << vertical_vec[i] << " ";
+    //all processes do these steps:
+
+    int m = M / P + ((p < (M % P)) ? 1 : 0);
+
+    x.resize(m); // local vector in each process
+
+    //y.resize(M / P + ((q < M % Q) ? 1 : 0));
+
+
+
+    std::cout << "( " << p << "," << q << ") m=" << m << std::endl;
+
+    MPI_Comm col_comm;
+
+    MPI_Comm_split(MPI_COMM_WORLD, q /*rank / Q*/, p /*sort key */, &col_comm);
+
+    if (q == 0)
+
+    {
+
+        // Scatter data down the first column
+
+        std::vector<int> recvcounts(P), displs(P);
+
+        // this is really only needed in p==0, but not going to specialize now.
+
+        for (int i = 0; i < P; i++)
+
+        {
+
+            recvcounts[i] = M / P;
+
+            if (i < (M % P))
+
+                recvcounts[i]++;
+
+            displs[i] = i * (M / P) + ((i < M % P) ? i : M % P);
+
+        }
+
+        // the q==0 column scatters.
+
+        MPI_Scatterv((rank == 0) ? xglobal.data() : nullptr, recvcounts.data(),
+
+                     displs.data(), MPI_INT, x.data(), m, MPI_INT, 0, col_comm);
+
     }
-    cout << endl;
 
-    // Broadcast the horizontal vector to all processes
-    MPI_Bcast(&horizontal_vec[0], M, MPI_INT, 0, MPI_COMM_WORLD);
+    // Broadcast data horizontally in each process row
 
-    // Compute the partial dot product
-    int partial_dot_product = inner_product(vertical_vec.begin(), vertical_vec.end(), horizontal_vec.begin() + rank * local_size, 0);
+    MPI_Comm row_comm;
 
-    // Sum up the partial dot products from all processes
-    int total_dot_product;
-    MPI_Reduce(&partial_dot_product, &total_dot_product, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Comm_split(MPI_COMM_WORLD, p /*rank / Q*/, q /*sort key */, &row_comm);
 
-    // Print out the result
+    MPI_Bcast(x.data(), m, MPI_INT, 0, row_comm); // replicates x in each proc. column
+
+
+
+    // Moved this line down, and modified, since unrelated to first step above!
+
+    int n = M / Q + ((q < (M % Q)) ? 1 : 0);
+
+    y.resize(n); // REVISED.  Row replicated, Col distr.
+
+    for (int j = 0; j < n; j++)
+
+        y[j] = 0;
+
+
+
+    int nominal1 = M / P;
+
+    int extra1 = M % P;
+
+    for (int i = 0; i < m; i++) // m is the local size of the vector x[]
+
+    {
+
+        // x local to global: given that this element is (p,i), what is its global index I?
+
+        int I = i + ((p < extra1) ? (nominal1 + 1) * p :
+
+                     (extra1 * (nominal1 + 1) + (p - extra1) * nominal1));
+
+        // so to what (qhat,jhat) does this element of the original global vector go?
+
+        int qhat = I % Q;
+
+        int jhat = I / Q;
+
+        if (qhat == q) // great, this process has an element of y!
+
+        {
+
+            y[jhat] = x[i];
+
+        }
+
+    }
+
+
+
+    MPI_Allreduce(MPI_IN_PLACE, y.data(), n, MPI_INT, MPI_SUM, col_comm);
+
+
+
+    // Dot product of y with itself
+
+    int local_dot = 0;
+
+    for (int i = 0; i < n; i++) {
+
+        local_dot += y[i] * y[i];
+
+    }
+
+    int global_dot;
+
+    MPI_Allreduce(&local_dot, &global_dot, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+
+
     if (rank == 0) {
-        cout << "Dot product: " << total_dot_product << endl;
+
+        std::cout << "Dot product of y with itself: " << global_dot << std::endl;
+
     }
+
+
+
+    // Finalize MPI
+
+    MPI_Comm_free(&row_comm);
+
+    MPI_Comm_free(&col_comm);
 
     MPI_Finalize();
-    return 0;
+
 }
+
+

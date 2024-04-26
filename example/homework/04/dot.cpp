@@ -1,63 +1,189 @@
-#include "mpi.h"
 #include <iostream>
-#include <stdio.h>
-#include <stdlib.h>
+
 #include <vector>
-#include <numeric> // for std::inner_product
 
-using namespace std;
+#include <mpi.h>
 
-int main(int argc, char **argv)
-{
-    int rank, size;
+
+
+int main(int argc, char *argv[]) {
+
     MPI_Init(&argc, &argv);
+
+    int rank, size;
+
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    int M = size; // Length of the vectors
-    int local_size = M / size; // Size of local portion of vectors
+    int P = 2;
 
-    // Initialize vectors
-    vector<int> horizontal_vec(M); // Horizontal vector
-    vector<int> vertical_vec(local_size); // Vertical vector
+    int Q = size / P;
 
-    // Initialize horizontal vector in process 0
-    if (rank == 0) {
-        for (int i = 0; i < M; ++i) {
-            horizontal_vec[i] = i + 1; // Just an example initialization
+    if (size != P * Q) {
+
+        if (rank == 0)
+
+            std::cout << "Number of processes is not compatible with the topology." << std::endl;
+
+        MPI_Finalize();
+
+        exit(0);
+
+    }
+
+    int p = rank / Q, q = rank % Q;
+
+    int M = 15;
+
+    std::vector<int> xglobal, x, y;
+
+    if (q == 0 && p == 0) {
+
+        xglobal.resize(M);
+
+        for (int i = 0; i < M; i++)
+
+            xglobal[i] = i + 1;
+
+    }
+
+    int m = M / P + ((p < (M % P)) ? 1 : 0);
+
+    x.resize(m);
+
+    MPI_Comm col_comm;
+
+    MPI_Comm_split(MPI_COMM_WORLD, q, p, &col_comm);
+
+    if (q == 0) {
+
+        std::vector<int> recvcounts(P), displs(P);
+
+        for (int i = 0; i < P; i++) {
+
+            recvcounts[i] = M / P;
+
+            if (i < (M % P)) recvcounts[i]++;
+
+            displs[i] = i * (M / P) + ((i < M % P) ? i : M % P);
+
         }
-        cout << "Horizontal Vector:" << endl;
-        for (int i = 0; i < M; ++i) {
-            cout << horizontal_vec[i] << " ";
+
+        MPI_Scatterv((rank == 0) ? xglobal.data() : nullptr, recvcounts.data(),
+
+                     displs.data(), MPI_INT, x.data(), m, MPI_INT, 0, col_comm);
+
+    }
+
+    MPI_Comm row_comm;
+
+    MPI_Comm_split(MPI_COMM_WORLD, p, q, &row_comm);
+
+    MPI_Bcast(x.data(), m, MPI_INT, 0, row_comm);
+
+    int n =  M / Q + ((q < (M % Q)) ? 1 : 0);
+
+    y.resize(n);
+
+    for(int j = 0; j < n; j++)
+
+        y[j] = 0;
+
+    int nominal1 = M / P; int extra1 = M % P;
+
+    int nominal2 = M / Q; int extra2 = M % Q;
+
+    for(int i = 0; i < m; i++) {
+
+        int I = i + ((p < extra1) ? (nominal1+1)*p :
+
+                     (extra1*(nominal1+1)+(p-extra1)*nominal1));
+
+        int qhat = (I < extra2*(nominal2+1)) ? I/(nominal2+1) : 
+
+                   (extra2+(I-extra2*(nominal2+1))/nominal2);
+
+        int jhat = I - ((qhat < extra2) ? (nominal2+1)*qhat :
+
+                        (extra2*(nominal2+1) + (qhat-extra2)*nominal2));
+
+        if(qhat == q) {
+
+            y[jhat] = x[i];
+
         }
-        cout << endl;
+
     }
 
-    // Scatter the horizontal vector among processes
-    MPI_Scatter(&horizontal_vec[0], local_size, MPI_INT, &vertical_vec[0], local_size, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, y.data(), n, MPI_INT, MPI_SUM, col_comm);
 
-    // Broadcast the horizontal vector to all processes
-    MPI_Bcast(&horizontal_vec[0], M, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Print out the local portion of the vertical vector
-    cout << "Rank: " << rank << " Vertical Vector:" << endl;
-    for (int i = 0; i < local_size; ++i) {
-        cout << vertical_vec[i] << " ";
+
+    // Print vectors x and y
+
+    for (int i = 0; i < size; i++) {
+
+        if (rank == i) {
+
+            std::cout << "Process (" << p << "," << q << "): x = ";
+
+            for (int j = 0; j < m; j++)
+
+                std::cout << x[j] << " ";
+
+            std::cout << std::endl;
+
+
+
+            std::cout << "Process (" << p << "," << q << "): y = ";
+
+            for (int j = 0; j < n; j++)
+
+                std::cout << y[j] << " ";
+
+            std::cout << std::endl;
+
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+
     }
-    cout << endl;
 
-    // Compute the partial dot product
-    int partial_dot_product = inner_product(vertical_vec.begin(), vertical_vec.end(), horizontal_vec.begin() + rank * local_size, 0);
 
-    // Sum up the partial dot products from all processes
-    int total_dot_product;
-    MPI_Reduce(&partial_dot_product, &total_dot_product, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    // Print out the result
+    // Compute the dot product locally
+
+    int local_dot = 0;
+
+    for (int i = 0; i < n; i++) {
+
+        local_dot += y[i] * y[i];
+
+    }
+
+
+
+    int global_dot;
+
+    MPI_Allreduce(&local_dot, &global_dot, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+
+
     if (rank == 0) {
-        cout << "Dot product: " << total_dot_product << endl;
+
+        std::cout << "Dot product of vectors: " << global_dot << std::endl;
+
     }
+
+
+
+    MPI_Comm_free(&row_comm);
+
+    MPI_Comm_free(&col_comm); 
 
     MPI_Finalize();
-    return 0;
+
 }
+
+
